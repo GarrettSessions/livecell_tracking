@@ -15,13 +15,13 @@ Tracking is performed using bTrack, and a custom Napari based tracking correctio
 for details on how to use this system.
 
 **Python Environment Selection**
-Use the livecell_GPU_segment environment for the following notebooks:
-00_prepare_tracking
-01_cellpose_segmentation
-02_labels2df_regionprops
+Use the livecell_GPU_segment environment for the following notebooks: <div style="page-break-after: always;"></div>
+00_prepare_tracking <div style="page-break-after: always;"></div>
+01_cellpose_segmentation <div style="page-break-after: always;"></div>
+02_labels2df_regionprops <div style="page-break-after: always;"></div>
 
-Use the livecell_tracking environment for the following notebooks:
-03_df2tracks_bTrack
-03_df2tracks_bTrack_divide_series **Note** This notebook is unmodified from the original and may no longer be needed. Only use if the downscaling features are insufficient
-04_tracking_correction
+Use the livecell_tracking environment for the following notebooks: <div style="page-break-after: always;"></div>
+03_df2tracks_bTrack <div style="page-break-after: always;"></div>
+03_df2tracks_bTrack_divide_series **Note** This notebook is unmodified from the original and may no longer be needed. Only use if the downscaling features are insufficient <div style="page-break-after: always;"></div>
+04_tracking_correction <div style="page-break-after: always;"></div>
 postCorrection_visual
