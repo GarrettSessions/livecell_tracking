@@ -11,7 +11,7 @@ This pipeline is modified from the original to included new features for very la
 Cell segmentation is performed using CellPose. The provided code is configured to take advantage of CUDA enabled GPUs for faster segmentation. However, CPU based segmentation is possible and may be enabled through
 setting the noted flag in notebook 01_cellpose_segmentation. Also note that GPU segmentation is restricted by the amount of video RAM available. Some movies may be too large to use GPU segmentation on low power GPUs.
 
-Tracking is performed using bTrack, and a custom Napari based tracking correction system. Please see the "Training for Napari" movie, which is a recorded training session from Kasia Kedziora,
+Tracking is performed using bTrack, and a custom Napari based tracking correction system. Please see the "Training for Napari" movie, available on request, which is a recorded training session from Kasia Kedziora,
 for details on how to use this system.
 
 **Python Environment Selection**
