@@ -24,8 +24,8 @@ Use the livecell_tracking environment for the following notebooks: <div style="p
 03_df2tracks_bTrack <div style="page-break-after: always;"></div>
 03_df2tracks_bTrack_divide_series **Note** This notebook is unmodified from the original and may no longer be needed. Only use if the downscaling features are insufficient <div style="page-break-after: always;"></div>
 04_tracking_correction <div style="page-break-after: always;"></div>
-postCorrection_visual
+postCorrection_visual<div style="page-break-after: always;"></div>
 
 **Python Environment Selection**
-In order to enable error handling, please edit the logging_config.py file and select a location for saving the log file. 
-If you do not wish to log, you can delete the relevant lines from general_functions, napari_build_viewer, and napari_display_functions
+In order to enable error handling, please edit the logging_config.py file and select a location for saving the log file. <div style="page-break-after: always;"></div>
+If you do not wish to log, you can delete the relevant lines from general_functions, napari_build_viewer, and napari_display_functions<div style="page-break-after: always;"></div>
