@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Created on Fri Jul  2 11:34:01 2021
+Created on Wed Jan 17 11:34:01 2024
 
-@author: Kasia Kedziora
+@author: Garrett Sessions
 """
 
 import importlib
@@ -13,6 +13,13 @@ import pandas as pd
 from pandas.core.base import NoNewAttributesMixin
 import numpy as np
 from skimage import measure
+
+#new packages for logging
+import sys
+import logging
+from logging_config import configure_logging
+
+configure_logging()
 
 fov_f = importlib.import_module('ring_functions')
 
@@ -31,28 +38,35 @@ def update_dataFrame(channel_list,my_labels,df,current_frame,active_label,object
     output:
        df 
     '''
-    
+    logging.debug("update dataframe loaded")
     # create intensity image
     signal_image = create_intensityImage(channel_list,current_frame)
+    logging.debug("signal image")
 
     # create mask with only a selected object
     single_label_im = create_singleLabel(my_labels,current_frame,active_label)
+    logging.debug("single label im")
     
     # characterize new nucleus
     cellData = characterize_newNucleus(single_label_im,signal_image,object_properties)
+    logging.debug("cell data")
     
     # create ring image
     x = int(cellData['centroid-0'])
     y = int(cellData['centroid-1'])
     single_label_ring = make_ringImage(single_label_im,x,y,imSize=200)
+    logging.debug("ring image created")
     
 
     # measure properties of the ring
     ringData = characterize_newRing(single_label_ring,signal_image)
+    logging.debug("ring data created")
     
     # put data frames together
     labels_set = np.unique(my_labels[current_frame,:,:])
+    logging.debug("labels set")
     df = mod_dataFrame(df,cellData,ringData,current_frame,labels_set,flag_list)
+    logging.debug("dataframe created")
     
     return df
 
@@ -204,30 +218,35 @@ def mod_dataFrame(df,cellData,ringData,current_frame,labels_set,flag_list):
     output:
         df - modified general data frame
     '''
-    
+    logging.debug("mod dataframe loaded")
     # check which cell it is
     active_label = list(cellData['label'])[0]
+    logging.debug("mod dataframe active label")
 
     # put nucleus and ring data together
     cellData = pd.merge(cellData,ringData,how='inner',on='label',suffixes=('_nuc', '_ring'))
+    logging.debug("mod dataframe cell data")
     
     # add aditional info
     cellData['t'] = current_frame
     cellData['track_id'] = active_label
     cellData['x'] = cellData['centroid-0']
     cellData['y'] = cellData['centroid-1']
+    logging.debug("mod dataframe additional cell data info")
 
     # add necessary tags
     for flag in flag_list:
         col = flag['flag_column']
         cellData[col] = False
-    
+    logging.debug("mod dataframe needed tags")
+
     # collect information about this label and this time point to calculate 
     info_track = df.loc[:,['track_id','parent','root','generation','accepted','promise','rejected']].drop_duplicates()
-    
+    logging.debug("mod dataframe info track")
     
     # merge it to the data of this frame
-    cellData = cellData.merge(info_track,on='track_id',how='left')   
+    cellData = cellData.merge(info_track,on='track_id',how='left')  
+    logging.debug("mod dataframe cell data merge") 
     
     # take care of the totally new tracks
     if (cellData.loc[0,'parent'] == cellData.loc[0,'parent']):
@@ -236,27 +255,52 @@ def mod_dataFrame(df,cellData,ringData,current_frame,labels_set,flag_list):
         cellData.parent = cellData.track_id
         cellData.generation = 0
         cellData.root = cellData.track_id
-    
+    logging.debug("mod dataframe celldata new tracks")
        
     # swap in the general data frame
     curr_df = df.loc[df.t==current_frame,:]
+    logging.debug("mod dataframe current dataframe")
     
     drop_modified = (curr_df.track_id==active_label)
+    logging.debug("mod dataframe drop modified")
     
     # close overlaping objects
     #drop_overlaping_neighbours = ((abs(df['centroid-0']-cellData['centroid-0'][0])<10) & (abs(df['centroid-1']-cellData['centroid-1'][0])<10))
     
     # objects that were removed
     drop_missing = [not(x in labels_set) for x in curr_df.track_id]
+    logging.debug("mod dataframe drop missing")
     
     what_to_drop = (drop_modified | drop_missing)
+    logging.debug("mod dataframe what to drop")
     
-    curr_df.drop(curr_df[what_to_drop].index,axis=0,inplace=True)
-    curr_df = curr_df.append(cellData,ignore_index=True)
-    
+    try:
+        curr_df.drop(curr_df.loc[what_to_drop].index, axis=0, inplace=True)
+        logging.debug("mod dataframe this is the line that's showing up")
+
+        # Convert curr_df to DataFrame if it's not already
+        if not isinstance(curr_df, pd.DataFrame):
+            curr_df = pd.DataFrame(curr_df)
+            logging.debug("Converting into Dataframe")
+
+        curr_df = pd.concat([curr_df, cellData], ignore_index=True)
+
+        logging.debug("mod dataframe dropping more stuff using concat instead of append")
+    except Exception as e:
+        logging.error(f"An error occurred: {e}")
+
     # drop current frame 
-    df.drop(df[df.t==current_frame].index,axis=0,inplace=True)
-    df = df.append(curr_df,ignore_index=True)
+    df.drop(df[df.t==current_frame].index, axis=0, inplace=True)
+    logging.debug("df drop completed")
+
+    # Convert curr_df to DataFrame if it's not already
+    if not isinstance(curr_df, pd.DataFrame):
+        curr_df = pd.DataFrame(curr_df)
+        logging.debug("Modifying curr_df to make it a dataframe. Again.")
+
+    # Concatenate DataFrames
+    df = pd.concat([df, curr_df], ignore_index=True)
+    logging.debug("mod dataframe completed")
     
     return df
 
