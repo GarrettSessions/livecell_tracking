@@ -26,6 +26,7 @@ Use the livecell_tracking environment for the following notebooks: <div style="p
 04_tracking_correction <div style="page-break-after: always;"></div>
 postCorrection_visual<div style="page-break-after: always;"></div>
 
-**Python Environment Selection**
+**Logging**
+
 In order to enable error handling, please edit the logging_config.py file and select a location for saving the log file. <div style="page-break-after: always;"></div>
-If you do not wish to log, you can delete the relevant lines from general_functions, napari_build_viewer, and napari_display_functions<div style="page-break-after: always;"></div>
+If you do not wish to log, you can delete the relevant lines from general_functions, napari_build_viewer, and napari_display_functions
