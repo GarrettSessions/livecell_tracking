@@ -5,6 +5,14 @@ Created on Tue Aug 17 12:51:41 2021
 @author: kmkedz
 """
 
+#new packages for logging
+import logging
+from logging_config import configure_logging
+
+configure_logging()
+
+logging.debug("Build Viewer has loaded")
+
 import os
 import time
 import numpy as np
@@ -54,6 +62,8 @@ def should_i_save():
     if time_passed > time_threshold:
         
         return True
+	#added autosave message GS
+        message = 'Autosave performed'
     else:
         return False
 
@@ -68,8 +78,8 @@ def save_update():
         message = 'Data has been saved.'
     
     else:
-        
-        message = ' '
+        #Added save failed message GS
+        message = 'Save Failed'
         
     return message
 
@@ -126,6 +136,7 @@ def mod_label(viewer: Viewer):
     global gen_track_columns
     global flag_list
 
+#Update	single object is unique to modify label definition GS
     viewer,df = my_napari.update_single_object(viewer,df,channel_list,object_properties,gen_track_columns,flag_list)
     
     active_label = viewer.layers['Labels'].selected_label

@@ -17,6 +17,13 @@ import numpy as np
 
 import general_functions as gen
 
+#new packages for logging
+import sys
+import logging
+from logging_config import configure_logging
+
+configure_logging()
+
 def display_set(viewer,stack_labels,stack_im_list,channel_list,label_contour=0):
     
     '''
@@ -387,8 +394,10 @@ def connect_track(viewer,df,gen_track_columns):
     return viewer,df
 
 def update_single_object(viewer,df,channel_list,object_properties,gen_track_columns,flag_list):
+
+    logging.debug("update single object loaded")
     
-    
+    viewer.status = 'Starting single object update'     
     # get images of objects
     my_labels = viewer.layers['Labels'].data
     
@@ -396,14 +405,29 @@ def update_single_object(viewer,df,channel_list,object_properties,gen_track_colu
     # modify data frame
     ########################################################
 
+    viewer.status = 'Getting Position in Time'
     # get the position in time
     current_frame = viewer.dims.current_step[0]
 
     # get my label
+    viewer.status = 'Getting Label'
     active_label = viewer.layers['Labels'].selected_label
 
+    viewer.status = 'Calculating features of new cell current point of success'
+    logging.debug("Current point of success log test")
     # calculate features of a new cell and store in the general data frame
+    # generating this df appears to be the point of failure and it references general_functions
+    viewer.status = f'channel list is {channel_list}'
+    viewer.status = f'my_labels is {my_labels}'
+    viewer.status = f'df is {df}'
+    viewer.status = f'current_frame is {current_frame}'
+    viewer.status = f'active_label is {active_label}'
+    viewer.status = f'object_properties is {object_properties}'
+    viewer.status = f'flag_list is {flag_list}'
+    viewer.status = 'Ready to run general functions update dataframe'
+    logging.debug("preparing to run broken function")
     df = gen.update_dataFrame(channel_list,my_labels,df,current_frame,active_label,object_properties,flag_list)
+    viewer.status = 'Ready to modify tracking layer'
 
     ########################################################
     # modify tracking layer
@@ -411,6 +435,7 @@ def update_single_object(viewer,df,channel_list,object_properties,gen_track_colu
     # this acually could be done only per track if extraction of data takes a lot of time
 
     # modify the data for the layer
+    viewer.status = 'Modifying Tracking Layer'
     data,properties,graph = gen.trackData_from_df(df,col_list=gen_track_columns)
 
     # change tracks layer
