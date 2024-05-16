@@ -212,11 +212,11 @@ def read_channels(info_lines,check=False,df=0,exp_dir=0):
             channel_list.append(temp_channel)
 
     # check that all channels are unique
-    channel_num_list = [x['channel_number'] for x in channel_list]
-    if len(channel_num_list) == len(set(channel_num_list)):
-        pass
-    else:
-        raise(InputError('Error in txt file.',"Channels are not unique."))
+    #channel_num_list = [x['channel_number'] for x in channel_list]
+    #if len(channel_num_list) == len(set(channel_num_list)):
+    #    pass
+    #else:
+    #    raise(InputError('Error in txt file.',"Channels are not unique."))
         
     return(channel_list)
 

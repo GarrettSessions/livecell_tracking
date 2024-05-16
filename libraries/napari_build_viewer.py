@@ -92,7 +92,7 @@ def save_data(viewer: Viewer):
     global exp_dir
     global df_name
     
-    df.to_pickle(os.path.join(exp_dir,'df',df_name), protocol=4)
+    df.to_pickle(os.path.join(exp_dir,'df',df_name))
     viewer.status = 'Data has been saved.'
        
 def cut_track(viewer: Viewer):
