@@ -86,16 +86,6 @@ def save_update():
 ##########################################################################
 # functions for buttons
 
-###Old Save Function
-#def save_data(viewer: Viewer):
-#    
-#    global df
-#    global exp_dir
-#    global df_name
-#    
-#    df.to_pickle(os.path.join(exp_dir,'df',df_name))
-#    viewer.status = 'Data has been saved.'
-
 ###New Save function with timestamps for previous versions.
 def save_data(viewer: Viewer):
     global df
@@ -109,7 +99,6 @@ def save_data(viewer: Viewer):
     save_path = os.path.join(save_dir, df_name)
     base, ext = os.path.splitext(df_name)
 
-    # 1. Backup existing file if present
     if os.path.exists(save_path):
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         backup_name = f"{base}_{timestamp}{ext}"
@@ -117,16 +106,14 @@ def save_data(viewer: Viewer):
         os.rename(save_path, backup_path)
         print(f"Existing file renamed to backups/{backup_name}")
 
-    # 2. Save new file
     df.to_pickle(save_path)
     viewer.status = 'Data has been saved.'
 
-    # 3. Clean up old backups (keep only 10)
     backup_files = [
         f for f in os.listdir(backup_dir)
         if f.startswith(base + "_") and f.endswith(ext)
     ]
-    backup_files.sort()  # Timestamps ensure correct order
+    backup_files.sort()
 
     if len(backup_files) > 10:
         files_to_delete = backup_files[:len(backup_files) - 10]
