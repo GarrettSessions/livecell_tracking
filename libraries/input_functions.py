@@ -159,6 +159,8 @@ def check_graph(df,graph,channel_list):
 
                 request_list.append(f'{key_word}_{function[signal]}')
                 replacement_list.append(f'{df.loc[0,col]}')
+                #replacement_list.append(f'{df.iloc[0][col]}')
+
 
             else:
                 raise(InputError('Error in txt file.',f"'{col}' requested for '{graph['graph_name']}' graph as c does not exist."))
