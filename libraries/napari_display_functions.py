@@ -113,63 +113,149 @@ def create_graph_widget(graph_list,df,current_track,viewer):
         
     return mpl_widget
 
+
+
+def _accepted_track_ids(df):
+    """Return track IDs marked accepted anywhere in the dataframe."""
+    if 'accepted' not in df.columns:
+        return set()
+    sel = df.loc[df['accepted'].fillna(False).astype(bool), 'track_id'].dropna()
+    return set(sel.astype(int).tolist())
+
+
+def _forward_affected_track_ids(df, current_frame, active_label):
+    """Track IDs whose rows may be changed by gen.forward_df from this frame onward."""
+    active_label = int(active_label)
+    current_frame = int(current_frame)
+    affected = {active_label}
+    frontier = [active_label]
+
+    while frontier:
+        parent_id = frontier.pop()
+        child_rows = df.loc[
+            (df['parent'] == parent_id) & (df['track_id'] != parent_id),
+            'track_id'
+        ].dropna()
+        for child in child_rows.astype(int).unique():
+            if child not in affected:
+                affected.add(int(child))
+                frontier.append(int(child))
+
+    # forward_df only changes rows at or after current_frame.
+    return {
+        tid for tid in affected
+        if ((df['track_id'] == tid) & (df['t'] >= current_frame)).any()
+    }
+
+
+def _accepted_forward_conflicts(df, current_frame, *track_ids):
+    """Accepted tracks that would be modified by one or more forward_df operations."""
+    accepted = _accepted_track_ids(df)
+    affected = set()
+    for track_id in track_ids:
+        if track_id is None:
+            continue
+        try:
+            track_id = int(track_id)
+        except (TypeError, ValueError):
+            continue
+        if track_id > 0:
+            affected |= _forward_affected_track_ids(df, current_frame, track_id)
+    return sorted(accepted & affected)
+
+
+def _restore_accepted_track_pixels(my_labels, df, current_frame, active_label):
+    """Restore only accepted-track pixels actually involved in this edit.
+
+    Accepted masks are immutable, but Modify Label remains authoritative for every
+    unprotected pixel.  Crucially, this check is *edit-local*: unrelated pre-existing
+    differences between a live accepted mask and dataframe reconstruction do not get
+    "repaired" merely because Modify Label was used elsewhere in the frame.
+
+    Rules
+    -----
+    * If the active label itself is accepted, restore any change to that accepted
+      mask back to its saved dataframe state.
+    * If the active label is not accepted, restore only saved accepted-track pixels
+      that the active label has actually overwritten (Fill/Paint overlap).
+
+    Returns the accepted IDs touched and the number of restored pixels.
+    """
+    accepted = _accepted_track_ids(df)
+    if not accepted:
+        return [], 0
+
+    current_frame = int(current_frame)
+    active_label = int(active_label)
+    expected = gen.label_frame_from_df(df, current_frame)
+    observed = my_labels[current_frame]
+
+    protected_ids = []
+    restore_mask = np.zeros(observed.shape, dtype=bool)
+
+    for track_id in accepted:
+        track_id = int(track_id)
+        expected_mask = (expected == track_id)
+        if not np.any(expected_mask) and active_label != track_id:
+            continue
+
+        if active_label == track_id:
+            # Direct editing of an accepted track: restore the accepted mask exactly,
+            # including both lost pixels and accidental expansion outside its mask.
+            observed_mask = (observed == track_id)
+            changed = expected_mask != observed_mask
+        else:
+            # Editing some other label: only protect accepted pixels actually
+            # overwritten by that active label.  Ignore unrelated accepted-mask
+            # discrepancies elsewhere in this frame.
+            changed = expected_mask & (observed == active_label)
+
+        if np.any(changed):
+            protected_ids.append(track_id)
+            restore_mask |= changed
+
+    changed_pixel_count = int(np.count_nonzero(restore_mask))
+    if changed_pixel_count:
+        observed[restore_mask] = expected[restore_mask]
+
+    return sorted(set(protected_ids)), changed_pixel_count
+
+def _block_accepted_operation(viewer, operation_name, track_ids):
+    ids = sorted({int(x) for x in track_ids})
+    if not ids:
+        return False
+    id_text = ', '.join(str(x) for x in ids)
+    viewer.status = (
+        f'{operation_name} blocked: accepted track(s) {id_text} are protected. '
+        'Unaccept the track first if you intend to edit it.'
+    )
+    logging.warning(viewer.status)
+    return True
+
 def cut_track(viewer,df,gen_track_columns):
-    
-    '''
-    Function to cut a track at a given point.
-    '''
-    
-    # get images of objects
+    """Cut a track unless doing so would modify an accepted track."""
     my_labels = viewer.layers['Labels'].data
+    current_frame = int(viewer.dims.current_step[0])
+    active_label = int(viewer.layers['Labels'].selected_label)
 
-    # get the position in time
-    current_frame = viewer.dims.current_step[0]
+    conflicts = _accepted_forward_conflicts(df, current_frame, active_label)
+    if _block_accepted_operation(viewer, 'Cut', conflicts):
+        return viewer, df, False
 
-    # get my label
-    active_label = viewer.layers['Labels'].selected_label
-
-    # find new track number
     newTrack = gen.newTrack_number(df.track_id)
-
-    #####################################################################
-    # change labels layer
-    #####################################################################
-
-    my_labels = gen.forward_labels(my_labels,df,current_frame,active_label,newTrack)    
+    my_labels = gen.forward_labels(my_labels,df,current_frame,active_label,newTrack)
     viewer.layers['Labels'].data = my_labels
-
-    #####################################################################
-    # modify data frame
-    #####################################################################
     df = gen.forward_df(df,current_frame,active_label,newTrack)
-
-    #####################################################################
-    # remove tags from affected tracks
-    #####################################################################
     viewer = remove_tags(viewer, df,[active_label,newTrack])
 
-    #####################################################################
-    # change tracking layer
-    #####################################################################
-
-    # modify the data for the layer
     data,properties,graph = gen.trackData_from_df(df,col_list=gen_track_columns)
-
-    # change tracks layer
     viewer.layers['Tracking'].data = data
     viewer.layers['Tracking'].color_by = 'track_id'
     viewer.layers['Tracking'].properties = properties
     viewer.layers['Tracking'].graph = graph
-    
-
-    #####################################################################
-    # change viewer status
-    #####################################################################
-    
     viewer.layers['Labels'].selected_label = int(newTrack)
-    viewer.status = f'Track {active_label} was cut at frame {current_frame}.' 
-    
-    return viewer,df
+    viewer.status = f'Track {active_label} was cut at frame {current_frame}.'
+    return viewer,df,True
 
 def merge_track(viewer,df,gen_track_columns):
     
@@ -229,6 +315,12 @@ def merge_track(viewer,df,gen_track_columns):
             viewer.status = 'Only one point is allowed for merging.'
             
         if connTrack > 0:
+
+            conflicts = _accepted_forward_conflicts(
+                df, current_frame, active_label, connTrack
+            )
+            if _block_accepted_operation(viewer, 'Merge', conflicts):
+                return viewer, df, False
             
             # check if there is another branch that needs to be cleaned
             deadBranch = df.loc[((df.track_id==connTrack) & (df.t>=current_frame)),:]
@@ -288,7 +380,7 @@ def merge_track(viewer,df,gen_track_columns):
         viewer.status = 'It is not possible to merge objects from the first frame.'
     
         
-    return viewer,df
+    return viewer,df,True
 
 def connect_track(viewer,df,gen_track_columns):
     
@@ -341,6 +433,12 @@ def connect_track(viewer,df,gen_track_columns):
             viewer.status = 'Only one mother object is allowed to be connected.'
     
         if connTrack > 0:
+
+            conflicts = _accepted_forward_conflicts(
+                df, current_frame, active_label, connTrack
+            )
+            if _block_accepted_operation(viewer, 'Connect', conflicts):
+                return viewer, df, False
     
             # check if there is another branch that needs to be cleaned
             sisterBranch = df.loc[((df.track_id==connTrack) & (df.t>=current_frame)),:]
@@ -391,83 +489,142 @@ def connect_track(viewer,df,gen_track_columns):
     else:
         viewer.status = 'It is not possible to connect objects from the first frame.'
         
-    return viewer,df
+    return viewer,df,True
 
 def update_single_object(viewer,df,channel_list,object_properties,gen_track_columns,flag_list):
 
     logging.debug("update single object loaded")
-    
-    viewer.status = 'Starting single object update'     
-    # get images of objects
+
+    viewer.status = 'Starting single object update'
     my_labels = viewer.layers['Labels'].data
-    
-    ########################################################
-    # modify data frame
-    ########################################################
+    current_frame = int(viewer.dims.current_step[0])
+    active_label = int(viewer.layers['Labels'].selected_label)
 
-    viewer.status = 'Getting Position in Time'
-    # get the position in time
-    current_frame = viewer.dims.current_step[0]
+    if active_label <= 0:
+        message = 'Modify Label failed: select a non-zero label before committing the edit.'
+        logging.error(message)
+        viewer.status = message
+        return viewer, df, False
 
-    # get my label
-    viewer.status = 'Getting Label'
-    active_label = viewer.layers['Labels'].selected_label
+    # Accepted-track pixels are immutable, but they no longer reject the whole
+    # Modify Label operation.  If the user edit touches an accepted mask, restore
+    # only those protected pixels and keep every other napari edit authoritative.
+    protected_edits = []
+    protected_pixel_count = 0
+    try:
+        protected_edits, protected_pixel_count = _restore_accepted_track_pixels(
+            my_labels, df, current_frame, active_label
+        )
+        if protected_pixel_count:
+            viewer.layers['Labels'].refresh()
+            logging.warning(
+                'Modify Label restored %s protected pixel(s) belonging to accepted '
+                'track(s) %s, while preserving all other user edits.',
+                protected_pixel_count, protected_edits
+            )
+    except Exception as exc:
+        # Protection failure should not silently erase the user's work.  Do not
+        # reconstruct/rollback the frame here; report the diagnostic and continue
+        # with the user-edited frame as authoritative.
+        logging.exception('Unable to apply accepted-track pixel protection')
+        viewer.status = f'Warning: accepted-track pixel protection failed: {exc}'
 
-    viewer.status = 'Calculating features of new cell current point of success'
-    logging.debug("Current point of success log test")
-    # calculate features of a new cell and store in the general data frame
-    # generating this df appears to be the point of failure and it references general_functions
-    viewer.status = f'channel list is {channel_list}'
-    viewer.status = f'my_labels is {my_labels}'
-    viewer.status = f'df is {df}'
-    viewer.status = f'current_frame is {current_frame}'
-    viewer.status = f'active_label is {active_label}'
-    viewer.status = f'object_properties is {object_properties}'
-    viewer.status = f'flag_list is {flag_list}'
-    viewer.status = 'Ready to run general functions update dataframe'
-    logging.debug("preparing to run broken function")
-    df = gen.update_dataFrame(channel_list,my_labels,df,current_frame,active_label,object_properties,flag_list)
-    viewer.status = 'Ready to modify tracking layer'
+    # Manual label edits are authoritative. Reconcile only the labels actually
+    # touched by this edit. The active label and any labels overwritten/exposed
+    # inside its old/new footprint are remeasured once; untouched frame rows are
+    # left unchanged. This keeps Modify Label interactive even on crowded frames.
+    try:
+        logging.debug(
+            "Incrementally committing frame %s using authoritative napari label %s",
+            current_frame, active_label
+        )
+        updated_df, reconcile_actions = gen.reconcile_frame_to_labels(
+            channel_list, my_labels, df, current_frame,
+            object_properties, flag_list, active_label=active_label
+        )
+        logging.info("Incremental authoritative reconciliation: %s", reconcile_actions)
+    except Exception as exc:
+        message = f'Modify Label could not serialize label {active_label}: {exc}'
+        logging.exception(message)
+        viewer.status = message
+        return viewer, df, False
+
+    try:
+        is_valid, validation_message, validation_details = gen.validate_frame_label_sync(
+            my_labels, updated_df, current_frame
+        )
+        logging.info(validation_message)
+        logging.debug("Synchronization details: %s", validation_details)
+    except Exception as exc:
+        is_valid = False
+        validation_message = f'Frame synchronization diagnostic failed: {exc}'
+        validation_details = {}
+        logging.exception(validation_message)
+
+    # Commit the user's corrected label even if unrelated pre-existing mess in
+    # the frame prevents perfect synchronization.
+    df = updated_df
 
     ########################################################
     # modify tracking layer
     ########################################################
-    # this acually could be done only per track if extraction of data takes a lot of time
-
-    # modify the data for the layer
     viewer.status = 'Modifying Tracking Layer'
     data,properties,graph = gen.trackData_from_df(df,col_list=gen_track_columns)
 
-    # change tracks layer
     viewer.layers['Tracking'].data = data
     viewer.layers['Tracking'].color_by = 'track_id'
     viewer.layers['Tracking'].properties = properties
     viewer.layers['Tracking'].graph = graph
-    
+
     ########################################################
     # modify labeling points
     ########################################################
-
-    # collect the information
     sel_data = df.loc[df.accepted==True,:]
-    accepted_points = np.array([sel_data['t'],sel_data['centroid-0'],sel_data['centroid-1']]).T 
-    
+    accepted_points = np.array([sel_data['t'],sel_data['centroid-0'],sel_data['centroid-1']]).T
+
     sel_data = df.loc[df.rejected==True,:]
-    rejected_points = np.array([sel_data['t'],sel_data['centroid-0'],sel_data['centroid-1']]).T 
-    
+    rejected_points = np.array([sel_data['t'],sel_data['centroid-0'],sel_data['centroid-1']]).T
+
     sel_data = df.loc[df.promise==True,:]
-    promise_points = np.array([sel_data['t'],sel_data['centroid-0'],sel_data['centroid-1']]).T 
-    
+    promise_points = np.array([sel_data['t'],sel_data['centroid-0'],sel_data['centroid-1']]).T
+
     viewer.layers['Accepted Tracks'].data = accepted_points
     viewer.layers['Rejected Tracks'].data = rejected_points
     viewer.layers['Promising Tracks'].data = promise_points
 
-    ########################################################
-    # change viewer status
-    ########################################################
-    viewer.status = f'Frame {current_frame} was modified.' 
-    
-    return viewer,df
+    errors = reconcile_actions.get('errors', []) if isinstance(reconcile_actions, dict) else []
+    if errors:
+        message = (
+            f'Modify Label did not commit label {active_label}: ' + '; '.join(errors)
+        )
+        logging.error(message)
+        viewer.status = message
+        return viewer, df, False
+
+    if is_valid:
+        if protected_pixel_count:
+            viewer.status = (
+                f'Frame {current_frame} was modified from authoritative Labels as label {active_label}. '
+                f'Restored {protected_pixel_count} protected pixel(s) from accepted track(s) '
+                f'{protected_edits}.'
+            )
+        else:
+            viewer.status = (
+                f'Frame {current_frame} was modified from authoritative Labels as label {active_label}.'
+            )
+    else:
+        warning_parts = []
+        if not is_valid:
+            warning_parts.append(validation_message)
+        if errors:
+            warning_parts.append('Reconciliation warnings: ' + '; '.join(errors))
+        viewer.status = (
+            f'Label {active_label} was saved from the manual edit. Warning: ' +
+            ' '.join(warning_parts)
+        )
+
+    logging.info(viewer.status)
+    return viewer,df,True
 
 def remove_tags(viewer, df, list_of_tracks,list_of_tags = ['accepted','rejected'],list_of_layers = ['Accepted Tracks','Rejected Tracks']):
 
@@ -506,6 +663,24 @@ def node_info(track_ind,df):
     
     return node_start,node_stop
 
+
+def node_missing_frames(track_ind, df):
+    """Return integer frame numbers missing inside a track's observed lifespan.
+
+    Frames before the first observation and after the last observation are not
+    considered missing for that track. Duplicate dataframe rows at the same
+    timepoint are ignored.
+    """
+    node_t = df.loc[df.track_id == track_ind, 't'].dropna()
+    if len(node_t) == 0:
+        return []
+
+    observed = set(node_t.astype(int).tolist())
+    node_start = int(np.min(node_t))
+    node_stop = int(np.max(node_t))
+    return [frame for frame in range(node_start, node_stop + 1)
+            if frame not in observed]
+
 def generate_tree_min(paths,df):
 
     '''
@@ -538,6 +713,8 @@ def generate_tree_min(paths,df):
             exec(f'n{sub[0]} = temp')
             exec(f'n{sub[0]}.add_feature("start", {node_start})')
             exec(f'n{sub[0]}.add_feature("stop", {node_stop})')
+            missing_frames = node_missing_frames(sub[0], df)
+            exec(f'n{sub[0]}.add_feature("missing_frames", {missing_frames})')
             exec(f'n{sub[0]}.add_feature("n", {n})')
 
             node_list.append(sub[0])
@@ -557,6 +734,8 @@ def generate_tree_min(paths,df):
                     exec(f'n{node}=n{sub[k-1]}.add_child(name={node},dist={node_life})')
                     exec(f'n{node}.add_feature("start", {node_start})')
                     exec(f'n{node}.add_feature("stop", {node_stop})')
+                    missing_frames = node_missing_frames(node, df)
+                    exec(f'n{node}.add_feature("missing_frames", {missing_frames})')
                     exec(f'n{node}.add_feature("n", {n})')
                     
 

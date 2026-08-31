@@ -24,7 +24,7 @@ from magicgui import magicgui
 from magicgui.widgets import Container, CheckBox
 
 import pyqtgraph as pg
-from qtpy.QtWidgets import QVBoxLayout
+from qtpy.QtWidgets import QVBoxLayout, QPlainTextEdit
 from PyQt5.QtCore import Qt
 
 import napari_display_functions as my_napari
@@ -44,11 +44,51 @@ global viewer
 ##########################################################################
 # specify for optional saving
 
-def change_status(message):
+def install_operation_log(viewer_obj):
+    """Create a persistent, timestamped operation log dock in the main napari viewer."""
+    global operation_log_widget
 
+    operation_log_widget = QPlainTextEdit()
+    operation_log_widget.setReadOnly(True)
+    operation_log_widget.setMaximumBlockCount(2000)
+    operation_log_widget.setPlaceholderText('Tracking correction operations will appear here.')
+    viewer_obj.window.add_dock_widget(
+        operation_log_widget, area='bottom', name='Operation Log'
+    )
+    log_status('Operation log initialized.', viewer_obj=viewer_obj)
+    return operation_log_widget
+
+
+def log_status(message, level='INFO', viewer_obj=None):
+    """Send a message to napari status and the persistent operation log."""
     global viewer
-    
-    viewer.status = message
+    global operation_log_widget
+
+    target_viewer = viewer_obj if viewer_obj is not None else viewer
+    message = str(message)
+    target_viewer.status = message
+
+    timestamp = time.strftime('%H:%M:%S')
+    entry = f'[{timestamp}] [{level}] {message}'
+
+    try:
+        operation_log_widget.appendPlainText(entry)
+        scrollbar = operation_log_widget.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+    except (NameError, RuntimeError, AttributeError):
+        # The viewer can emit status messages before the log dock is created.
+        pass
+
+    if level == 'ERROR':
+        logging.error(message)
+    elif level == 'WARNING':
+        logging.warning(message)
+    else:
+        logging.info(message)
+
+
+def change_status(message):
+    log_status(message)
 
 def should_i_save():
     
@@ -92,6 +132,31 @@ def save_data(viewer: Viewer):
     global exp_dir
     global df_name
 
+    # Synchronization is diagnostic only. This is a manual-correction workflow,
+    # so the dataframe must always remain saveable even when the current Labels
+    # frame and dataframe are imperfect or temporarily disagree.
+    save_warning = None
+    try:
+        current_frame = int(viewer.dims.current_step[0])
+        my_labels = viewer.layers['Labels'].data
+        is_valid, validation_message, validation_details = gen.validate_frame_label_sync(
+            my_labels, df, current_frame
+        )
+        logging.debug(validation_message)
+        logging.debug("Pre-save synchronization details: %s", validation_details)
+        if not is_valid:
+            save_warning = validation_message
+            logging.warning(
+                "Saving dataframe despite Labels/dataframe mismatch: %s",
+                validation_message,
+            )
+    except Exception as exc:
+        # Validation failure must never prevent saving.
+        save_warning = f"Synchronization check unavailable: {exc}"
+        logging.exception(
+            "Synchronization check failed, but dataframe save will continue."
+        )
+
     save_dir = os.path.join(exp_dir, 'df')
     backup_dir = os.path.join(save_dir, 'backups')
     os.makedirs(backup_dir, exist_ok=True)
@@ -107,7 +172,10 @@ def save_data(viewer: Viewer):
         print(f"Existing file renamed to backups/{backup_name}")
 
     df.to_pickle(save_path)
-    viewer.status = 'Data has been saved.'
+    if save_warning:
+        log_status(f'Data has been saved. Warning: {save_warning}', level='WARNING')
+    else:
+        log_status('Data has been saved.')
 
     backup_files = [
         f for f in os.listdir(backup_dir)
@@ -126,7 +194,12 @@ def cut_track(viewer: Viewer):
     global df
     global gen_track_columns
     
-    viewer,df = my_napari.cut_track(viewer,df,gen_track_columns)
+    viewer,candidate_df,success = my_napari.cut_track(viewer,df,gen_track_columns)
+    if not success:
+        log_status(viewer.status, level='WARNING')
+        return
+    df = candidate_df
+    log_status(viewer.status)
     
     # optionally save dataframe
     if should_i_save():
@@ -137,7 +210,12 @@ def merge_track(viewer: Viewer):
     global df
     global gen_track_columns
     
-    viewer,df = my_napari.merge_track(viewer,df,gen_track_columns)
+    viewer,candidate_df,success = my_napari.merge_track(viewer,df,gen_track_columns)
+    if not success:
+        log_status(viewer.status, level='WARNING')
+        return
+    df = candidate_df
+    log_status(viewer.status)
     
     # optionally save dataframe
     if should_i_save():
@@ -148,33 +226,55 @@ def connect_track(viewer: Viewer):
     global df
     global gen_track_columns
     
-    viewer,df = my_napari.connect_track(viewer,df,gen_track_columns)
+    viewer,candidate_df,success = my_napari.connect_track(viewer,df,gen_track_columns)
+    if not success:
+        log_status(viewer.status, level='WARNING')
+        return
+    df = candidate_df
+    log_status(viewer.status)
     
     # optionally save dataframe
     if should_i_save():
         save_update()
 
 def mod_label(viewer: Viewer):
-    
+
     global df
     global channel_list
     global object_properties
     global gen_track_columns
     global flag_list
 
-#Update	single object is unique to modify label definition GS
-    viewer,df = my_napari.update_single_object(viewer,df,channel_list,object_properties,gen_track_columns,flag_list)
-    
-    active_label = viewer.layers['Labels'].selected_label
-    viewer.status = f'Label {active_label} has been modified.'
+    viewer, candidate_df, success = my_napari.update_single_object(
+        viewer, df, channel_list, object_properties, gen_track_columns, flag_list
+    )
 
-    # trigger modification of the family tree
+    current_frame = int(viewer.dims.current_step[0])
+
+    if not success:
+        # Preserve the detailed failure/warning generated by update_single_object.
+        log_status(
+            f'Frame {current_frame}: Modify Label failed for label '
+            f'{int(viewer.layers["Labels"].selected_label)}. {viewer.status}',
+            level='ERROR'
+        )
+        return
+
+    df = candidate_df
+    active_label = int(viewer.layers['Labels'].selected_label)
+    detail = str(viewer.status)
+    message = f'Frame {current_frame}: Label {active_label} modified and synchronized.'
+    if detail and detail != message:
+        message = f'{message} Detail: {detail}'
+    log_status(message)
+
+    # trigger modification of the family tree only after a successful commit
     update_lineage_display(None)
-    
+
     # optionally save dataframe
     if should_i_save():
         save_update()
-    
+
 def select_label(layer, event):
     
     global viewer
@@ -222,6 +322,20 @@ def toggle_track(layer, event):
 
             track_ind = [x['tag_name'] for x in tag_list].index(layer.name)
             tag_column = tag_list[track_ind]['tag_column']
+
+            # Accepted tracks are locked against status changes other than
+            # explicitly toggling the accepted flag itself. This prevents a
+            # click on Rejected/Promising from silently clearing accepted=True.
+            track_is_accepted = bool(
+                df.loc[df.track_id == myTrackNum, 'accepted'].fillna(False).astype(bool).any()
+            )
+            if track_is_accepted and tag_column != 'accepted':
+                message = (
+                    f'Frame {int(t)}: Status change blocked for accepted track '
+                    f'{int(myTrackNum)}. Unaccept the track first if you intend to change its status.'
+                )
+                log_status(message, level='WARNING')
+                return
     
             # check status
             track_status_old = list(df.loc[df.track_id==myTrackNum,tag_column])[0]
@@ -273,8 +387,12 @@ def toggle_track(layer, event):
              
             widget_label_promise.value = f'Number of promising tracks: {(len(promise_list)-1)}'
             widget_list_promise.choices = promise_list
- 
 
+            log_status(
+                f'Frame {int(t)}: Track {int(myTrackNum)} {tag_column} '
+                f'set to {bool(track_status_new)}.'
+            )
+ 
             # optionally save dataframe
             if should_i_save():
                 save_update()
@@ -371,18 +489,55 @@ def render_tree_view(plot_view,t,viewer):
             node_name = n.name
 
             # get position in time
-            x1 = n.start
-            x2 = n.stop
-            x_signal = [x1,x2]
+            x1 = int(n.start)
+            x2 = int(n.stop)
 
-            # get rendered position (y axis) 
+            # get rendered position (y axis)
             y_max = np.max([n.y,y_max])
-            y_signal = [n.y,n.y]
 
             label_color = labels_layer.get_color(node_name)
             pen = pg.mkPen(color=pg.mkColor((label_color*255).astype(int)),width=5)
 
-            plot_view.plot(x_signal, y_signal,pen=pen)
+            # Missing frames used to be invisible because every track was drawn
+            # as one continuous line from min(t) to max(t).  Keep the lineage
+            # layout unchanged, but split the visible branch into contiguous
+            # observed runs and mark each missing frame explicitly.
+            missing_frames = sorted([int(x) for x in getattr(n, 'missing_frames', [])])
+            missing_set = set(missing_frames)
+            observed_frames = [frame for frame in range(x1, x2 + 1)
+                               if frame not in missing_set]
+
+            if len(observed_frames) > 0:
+                run_start = observed_frames[0]
+                run_prev = observed_frames[0]
+
+                for frame in observed_frames[1:] + [None]:
+                    if (frame is None) or (frame != run_prev + 1):
+                        # A single observed frame still gets a short visible
+                        # segment centered on its integer timepoint.
+                        if run_start == run_prev:
+                            seg_x = [run_start - 0.35, run_prev + 0.35]
+                        else:
+                            seg_x = [run_start, run_prev]
+                        plot_view.plot(seg_x, [n.y, n.y], pen=pen)
+
+                        if frame is not None:
+                            run_start = frame
+                    if frame is not None:
+                        run_prev = frame
+
+            if len(missing_frames) > 0:
+                missing_pen = pg.mkPen(color=(255, 80, 80), width=2)
+                missing_brush = pg.mkBrush(255, 80, 80)
+                plot_view.plot(
+                    missing_frames,
+                    [n.y] * len(missing_frames),
+                    pen=None,
+                    symbol='x',
+                    symbolSize=10,
+                    symbolPen=missing_pen,
+                    symbolBrush=missing_brush,
+                )
 
             text_item = pg.TextItem(str(node_name),anchor=(1,1))
             text_item.setPos(x2,n.y)

@@ -26,46 +26,84 @@ fov_f = importlib.import_module('ring_functions')
 def update_dataFrame(channel_list,my_labels,df,current_frame,active_label,object_properties,flag_list):
     
     '''
-    Function to use viewer data to modify data frame with all data (for a specific object in a specific frame)
+    Function to use viewer data to modify data frame with all data
+    (for a specific object in a specific frame).
+
+    The napari selected label is treated as the authoritative track ID.
+    Regionprops is used only to recalculate object measurements.
     
     input:
         channel_list
         my_labels - sent as a layer from the viewer
         df
         current_frame
-        active_label
+        active_label - authoritative napari label / track ID
+        object_properties
+        flag_list
     
     output:
        df 
     '''
     logging.debug("update dataframe loaded")
+
+    active_label = int(active_label)
+    current_frame = int(current_frame)
+
+    if active_label <= 0:
+        raise ValueError("A non-zero label must be selected before modifying an object.")
+
     # create intensity image
     signal_image = create_intensityImage(channel_list,current_frame)
     logging.debug("signal image")
 
-    # create mask with only a selected object
+    # create mask with only the selected object
     single_label_im = create_singleLabel(my_labels,current_frame,active_label)
     logging.debug("single label im")
-    
+
+    if not np.any(single_label_im == active_label):
+        raise ValueError(
+            f"Selected label {active_label} is not present in frame {current_frame}. "
+            "Select the label that was painted/filled before clicking Modify Label."
+        )
+
+    # Preserve the exact user-authored mask, even if the same label currently
+    # contains multiple disconnected components.  In a manual-correction
+    # workflow the napari Labels pixels are authoritative; regionprops can
+    # measure a single integer label spanning disconnected components and the
+    # stored binary ``image`` can reproduce that mask exactly on reload.
+
     # characterize new nucleus
     cellData = characterize_newNucleus(single_label_im,signal_image,object_properties)
     logging.debug("cell data")
+
+    if len(cellData) != 1:
+        raise ValueError(
+            f"Expected one region for label {active_label} in frame {current_frame}, "
+            f"but regionprops returned {len(cellData)} regions."
+        )
     
     # create ring image
-    x = int(cellData['centroid-0'])
-    y = int(cellData['centroid-1'])
+    x = int(cellData.loc[0,'centroid-0'])
+    y = int(cellData.loc[0,'centroid-1'])
     single_label_ring = make_ringImage(single_label_im,x,y,imSize=200)
     logging.debug("ring image created")
     
-
     # measure properties of the ring
     ringData = characterize_newRing(single_label_ring,signal_image)
     logging.debug("ring data created")
+
+    if len(ringData) != 1:
+        raise ValueError(
+            f"Expected one ring for label {active_label} in frame {current_frame}, "
+            f"but regionprops returned {len(ringData)} regions."
+        )
     
     # put data frames together
     labels_set = np.unique(my_labels[current_frame,:,:])
     logging.debug("labels set")
-    df = mod_dataFrame(df,cellData,ringData,current_frame,labels_set,flag_list)
+    df = mod_dataFrame(
+        df, cellData, ringData, current_frame, active_label, labels_set, flag_list
+    )
     logging.debug("dataframe created")
     
     return df
@@ -203,35 +241,51 @@ def characterize_newRing(single_label_ring,signal_image):
     
     return ringData
 
-def mod_dataFrame(df,cellData,ringData,current_frame,labels_set,flag_list):
+def mod_dataFrame(df,cellData,ringData,current_frame,active_label,labels_set,flag_list):
     
     '''
-    function to modify gneral data frame with updated modified single object data
+    Modify the general dataframe with recalculated measurements for one object.
+
+    The supplied active_label is authoritative for both ``label`` and
+    ``track_id``. Regionprops-derived label values are not used to infer track
+    identity.
     
     input:
         df - original general data frame
         cellData
         ringData
         current_frame
+        active_label - authoritative napari label / track ID
         labels_set - set of labels present in the current frame
+        flag_list
         
     output:
         df - modified general data frame
     '''
     logging.debug("mod dataframe loaded")
-    # check which cell it is
-    active_label = list(cellData['label'])[0]
-    logging.debug("mod dataframe active label")
 
-    # put nucleus and ring data together
+    active_label = int(active_label)
+    current_frame = int(current_frame)
+    labels_set = set(int(x) for x in np.asarray(labels_set).tolist())
+
+    # Put nucleus and ring data together using the regionprops label only as
+    # an internal join key. Tracking identity is imposed explicitly below.
     cellData = pd.merge(cellData,ringData,how='inner',on='label',suffixes=('_nuc', '_ring'))
     logging.debug("mod dataframe cell data")
-    
-    # add aditional info
-    cellData['t'] = current_frame
-    cellData['track_id'] = active_label
-    cellData['x'] = cellData['centroid-0']
-    cellData['y'] = cellData['centroid-1']
+
+    if len(cellData) != 1:
+        raise ValueError(
+            f"Expected exactly one measured object for label {active_label} in "
+            f"frame {current_frame}; found {len(cellData)}."
+        )
+
+    # Explicitly preserve the napari-selected identity. This is the critical
+    # distinction between segmentation geometry and tracking identity.
+    cellData.loc[:, 'label'] = active_label
+    cellData.loc[:, 'track_id'] = active_label
+    cellData.loc[:, 't'] = current_frame
+    cellData.loc[:, 'x'] = cellData['centroid-0']
+    cellData.loc[:, 'y'] = cellData['centroid-1']
     logging.debug("mod dataframe additional cell data info")
 
     # add necessary tags
@@ -240,69 +294,346 @@ def mod_dataFrame(df,cellData,ringData,current_frame,labels_set,flag_list):
         cellData[col] = False
     logging.debug("mod dataframe needed tags")
 
-    # collect information about this label and this time point to calculate 
-    info_track = df.loc[:,['track_id','parent','root','generation','accepted','promise','rejected']].drop_duplicates()
-    logging.debug("mod dataframe info track")
-    
-    # merge it to the data of this frame
-    cellData = cellData.merge(info_track,on='track_id',how='left')  
-    logging.debug("mod dataframe cell data merge") 
-    
-    # take care of the totally new tracks
-    if (cellData.loc[0,'parent'] == cellData.loc[0,'parent']):
-        pass
+    # Preserve lineage / track-level information for an existing track ID.
+    # Do this by direct assignment from ONE representative row rather than a
+    # dataframe merge. A merge can silently duplicate the measured object when
+    # track-level status columns are not perfectly constant across every row.
+    track_meta_cols = ['parent','root','generation','accepted','promise','rejected']
+    existing_track = df.loc[df.track_id == active_label, track_meta_cols]
+    logging.debug("mod dataframe existing track metadata rows: %s", len(existing_track))
+
+    if len(existing_track) > 0:
+        representative = existing_track.iloc[0]
+        for col in track_meta_cols:
+            cellData.loc[:, col] = representative[col]
     else:
-        cellData.parent = cellData.track_id
-        cellData.generation = 0
-        cellData.root = cellData.track_id
-    logging.debug("mod dataframe celldata new tracks")
-       
-    # swap in the general data frame
-    curr_df = df.loc[df.t==current_frame,:]
+        # This is a completely new track ID.
+        cellData.loc[:, 'parent'] = active_label
+        cellData.loc[:, 'generation'] = 0
+        cellData.loc[:, 'root'] = active_label
+        for col in ['accepted','promise','rejected']:
+            cellData.loc[:, col] = False
+    logging.debug("mod dataframe track metadata assigned")
+
+    # Work on a copy to avoid chained-assignment/view behavior.
+    curr_df = df.loc[df.t==current_frame,:].copy()
     logging.debug("mod dataframe current dataframe")
-    
+
+    # Remove the old row for the object being modified.
     drop_modified = (curr_df.track_id==active_label)
     logging.debug("mod dataframe drop modified")
-    
-    # close overlaping objects
-    #drop_overlaping_neighbours = ((abs(df['centroid-0']-cellData['centroid-0'][0])<10) & (abs(df['centroid-1']-cellData['centroid-1'][0])<10))
-    
-    # objects that were removed
-    drop_missing = [not(x in labels_set) for x in curr_df.track_id]
+
+    # Remove rows for labels that were erased/reassigned in napari. This is
+    # what lets Fill-based source-ID -> destination-ID corrections remove the
+    # stale source row from the dataframe.
+    numeric_track_ids = pd.to_numeric(curr_df.track_id, errors='coerce')
+    drop_missing = ~numeric_track_ids.isin(labels_set)
     logging.debug("mod dataframe drop missing")
-    
+
     what_to_drop = (drop_modified | drop_missing)
     logging.debug("mod dataframe what to drop")
-    
-    try:
-        curr_df.drop(curr_df.loc[what_to_drop].index, axis=0, inplace=True)
-        logging.debug("mod dataframe this is the line that's showing up")
 
-        # Convert curr_df to DataFrame if it's not already
-        if not isinstance(curr_df, pd.DataFrame):
-            curr_df = pd.DataFrame(curr_df)
-            logging.debug("Converting into Dataframe")
+    curr_df = curr_df.loc[~what_to_drop].copy()
+    curr_df = pd.concat([curr_df, cellData], ignore_index=True)
+    logging.debug("mod dataframe replacement row added")
 
-        curr_df = pd.concat([curr_df, cellData], ignore_index=True)
-
-        logging.debug("mod dataframe dropping more stuff using concat instead of append")
-    except Exception as e:
-        logging.error(f"An error occurred: {e}")
-
-    # drop current frame 
-    df.drop(df[df.t==current_frame].index, axis=0, inplace=True)
-    logging.debug("df drop completed")
-
-    # Convert curr_df to DataFrame if it's not already
-    if not isinstance(curr_df, pd.DataFrame):
-        curr_df = pd.DataFrame(curr_df)
-        logging.debug("Modifying curr_df to make it a dataframe. Again.")
-
-    # Concatenate DataFrames
-    df = pd.concat([df, curr_df], ignore_index=True)
+    # Replace the entire current frame in the master dataframe atomically.
+    df_without_frame = df.loc[df.t!=current_frame,:].copy()
+    df = pd.concat([df_without_frame, curr_df], ignore_index=True)
     logging.debug("mod dataframe completed")
     
     return df
+
+def label_frame_from_df(df, current_frame):
+    """Reconstruct one labels frame from the authoritative dataframe.
+
+    This is used to roll back an uncommitted napari paint/fill edit when
+    Modify Label fails. It mirrors ``labels_from_df`` but only for one frame.
+    """
+    current_frame = int(current_frame)
+    row_total = int(df.size_x.iloc[0])
+    column_total = int(df.size_y.iloc[0])
+    label_image = np.zeros([row_total, column_total], dtype='uint16')
+
+    sel_data = df.loc[df.t == current_frame, :]
+    for _, my_cell in sel_data.iterrows():
+        if pd.isna(my_cell.get('label', np.nan)) or pd.isna(my_cell.get('track_id', np.nan)):
+            continue
+
+        min_row = int(my_cell['bbox-0'])
+        max_row = int(my_cell['bbox-2'])
+        min_col = int(my_cell['bbox-1'])
+        max_col = int(my_cell['bbox-3'])
+
+        segment = label_image[min_row:max_row, min_col:max_col]
+        image_segment = np.asarray(my_cell.image) * int(my_cell.track_id)
+
+        row_diff = segment.shape[0] - image_segment.shape[0]
+        if row_diff > 0:
+            image_segment = np.pad(image_segment, ((0, row_diff), (0, 0)), mode='constant')
+        elif row_diff < 0:
+            image_segment = image_segment[:segment.shape[0], :]
+
+        col_diff = segment.shape[1] - image_segment.shape[1]
+        if col_diff > 0:
+            image_segment = np.pad(image_segment, ((0, 0), (0, col_diff)), mode='constant')
+        elif col_diff < 0:
+            image_segment = image_segment[:, :segment.shape[1]]
+
+        # Reconstruct stored masks by assigning their track ID only where the
+        # saved binary mask is true. Addition can manufacture invalid numeric
+        # labels when bounding boxes overlap.
+        target = label_image[min_row:max_row, min_col:max_col]
+        mask = image_segment != 0
+        target[mask] = int(my_cell.track_id)
+        label_image[min_row:max_row, min_col:max_col] = target
+
+    return label_image
+
+
+def validate_frame_label_sync(my_labels, df, current_frame):
+    """Validate that a napari Labels frame and dataframe encode the same track IDs.
+
+    Returns
+    -------
+    is_valid : bool
+    message : str
+    details : dict
+        Contains labels_only, dataframe_only, and duplicate_dataframe_tracks.
+    """
+    current_frame = int(current_frame)
+
+    frame_labels = set(
+        int(x) for x in np.unique(my_labels[current_frame])
+        if not pd.isna(x) and int(x) > 0
+    )
+
+    frame_df = df.loc[df.t == current_frame, :].copy()
+    if 'label' in frame_df.columns:
+        frame_df = frame_df.loc[frame_df['label'].notna(), :]
+
+    frame_track_series = pd.to_numeric(frame_df['track_id'], errors='coerce').dropna().astype(int)
+    frame_tracks = set(int(x) for x in frame_track_series if int(x) > 0)
+
+    labels_only = sorted(frame_labels - frame_tracks)
+    dataframe_only = sorted(frame_tracks - frame_labels)
+
+    duplicate_dataframe_tracks = sorted(
+        int(x) for x in frame_track_series[frame_track_series.duplicated(keep=False)].unique()
+        if int(x) > 0
+    )
+
+    details = {
+        'labels_only': labels_only,
+        'dataframe_only': dataframe_only,
+        'duplicate_dataframe_tracks': duplicate_dataframe_tracks,
+    }
+
+    is_valid = not labels_only and not dataframe_only and not duplicate_dataframe_tracks
+
+    if is_valid:
+        message = f"Frame {current_frame}: Labels layer and dataframe track IDs are synchronized."
+    else:
+        parts = [f"Frame {current_frame}: Labels/dataframe synchronization failed."]
+        if labels_only:
+            parts.append(f"IDs present only in Labels: {labels_only}")
+        if dataframe_only:
+            parts.append(f"IDs present only in dataframe: {dataframe_only}")
+        if duplicate_dataframe_tracks:
+            parts.append(f"Duplicate dataframe track IDs in this frame: {duplicate_dataframe_tracks}")
+        message = ' '.join(parts)
+
+    return is_valid, message, details
+
+
+def _measure_label_row_from_frame(channel_list, my_labels, df, current_frame, label_id,
+                                  object_properties, flag_list, signal_image=None):
+    """Measure one label exactly as it exists in the current napari frame.
+
+    This helper performs no frame-wide reconciliation.  It returns one dataframe
+    row whose stored ``image``/bbox/centroid describe the actual pixels currently
+    present in napari for ``label_id``.
+    """
+    current_frame = int(current_frame)
+    label_id = int(label_id)
+
+    if signal_image is None:
+        signal_image = create_intensityImage(channel_list, current_frame)
+
+    single_label_im = create_singleLabel(my_labels, current_frame, label_id)
+    if not np.any(single_label_im == label_id):
+        raise ValueError(f'Label {label_id} is not present in frame {current_frame}.')
+
+    cellData = characterize_newNucleus(single_label_im, signal_image, object_properties)
+    if len(cellData) != 1:
+        raise ValueError(
+            f'Expected one regionprops row for label {label_id}; found {len(cellData)}.'
+        )
+
+    x = int(cellData.loc[0, 'centroid-0'])
+    y = int(cellData.loc[0, 'centroid-1'])
+    single_label_ring = make_ringImage(single_label_im, x, y, imSize=200)
+    ringData = characterize_newRing(single_label_ring, signal_image)
+    if len(ringData) != 1:
+        raise ValueError(
+            f'Expected one ring row for label {label_id}; found {len(ringData)}.'
+        )
+
+    row = pd.merge(cellData, ringData, how='inner', on='label', suffixes=('_nuc', '_ring'))
+    if len(row) != 1:
+        raise ValueError(
+            f'Expected one merged measurement row for label {label_id}; found {len(row)}.'
+        )
+
+    row.loc[:, 'label'] = label_id
+    row.loc[:, 'track_id'] = label_id
+    row.loc[:, 't'] = current_frame
+    row.loc[:, 'x'] = row['centroid-0']
+    row.loc[:, 'y'] = row['centroid-1']
+
+    same_frame_track = df.loc[
+        (df.t == current_frame) &
+        (pd.to_numeric(df.track_id, errors='coerce') == label_id), :
+    ]
+    existing_track_rows = df.loc[
+        pd.to_numeric(df.track_id, errors='coerce') == label_id, :
+    ]
+    same_frame_rep = same_frame_track.iloc[0] if len(same_frame_track) else None
+    track_rep = existing_track_rows.iloc[0] if len(existing_track_rows) else None
+
+    def _set_single_row_value(frame, col, value):
+        """Assign *value* to the sole row without expanding array-like objects.
+
+        Some dataframe fields (most importantly regionprops' ``image`` mask) are
+        NumPy arrays.  ``frame.loc[:, col] = value`` makes pandas interpret such
+        arrays as a vector to broadcast down the dataframe index.  For a one-row
+        measurement dataframe this raises errors such as "length of values (187)
+        does not match length of index (1)".  Store the value as one object cell
+        instead.
+        """
+        if col not in frame.columns:
+            frame[col] = pd.Series([None], dtype='object')
+        frame.at[frame.index[0], col] = value
+
+    # Preserve frame annotations when replacing an existing object.
+    for flag in flag_list:
+        col = flag['flag_column']
+        if same_frame_rep is not None and col in same_frame_rep.index:
+            _set_single_row_value(row, col, same_frame_rep[col])
+        else:
+            _set_single_row_value(row, col, False)
+
+    track_meta_cols = ['parent','root','generation','accepted','promise','rejected']
+    if track_rep is not None:
+        for col in track_meta_cols:
+            if col in track_rep.index:
+                _set_single_row_value(row, col, track_rep[col])
+    else:
+        _set_single_row_value(row, 'parent', label_id)
+        _set_single_row_value(row, 'root', label_id)
+        _set_single_row_value(row, 'generation', 0)
+        _set_single_row_value(row, 'accepted', False)
+        _set_single_row_value(row, 'promise', False)
+        _set_single_row_value(row, 'rejected', False)
+
+    # Preserve columns not recalculated by regionprops from the old row/track.
+    # Use scalar-cell assignment so object-valued fields such as ``image`` remain
+    # a single dataframe value rather than being interpreted as an iterable.
+    for col in df.columns:
+        if col in row.columns:
+            continue
+        if same_frame_rep is not None and col in same_frame_rep.index:
+            _set_single_row_value(row, col, same_frame_rep[col])
+        elif track_rep is not None and col in track_rep.index:
+            _set_single_row_value(row, col, track_rep[col])
+        elif col in ('size_x', 'size_y'):
+            vals = df[col].dropna() if col in df.columns else []
+            _set_single_row_value(row, col, vals.iloc[0] if len(vals) else np.nan)
+        else:
+            _set_single_row_value(row, col, np.nan)
+
+    return row
+
+
+def reconcile_frame_to_labels(channel_list, my_labels, df, current_frame, object_properties,
+                              flag_list, active_label=None):
+    """Fast authoritative commit for a napari Modify Label operation.
+
+    The active napari label is *always* remeasured and replaces its dataframe
+    row.  Only additional labels whose pixels were actually touched by that edit
+    are remeasured.  Labels removed completely by Fill are deleted.
+
+    This keeps the common Modify Label case to one regionprops/intensity pass,
+    while still serializing Fill operations that absorb or expose neighboring
+    labels.  Unlike the previous incremental implementation, measurement failure
+    raises an exception instead of silently returning the old dataframe.
+    """
+    if active_label is None:
+        raise ValueError('active_label is required for an authoritative Modify Label commit.')
+
+    current_frame = int(current_frame)
+    active_label = int(active_label)
+    frame_image = np.asarray(my_labels[current_frame])
+    old_frame_image = label_frame_from_df(df, current_frame)
+
+    if active_label <= 0 or not np.any(frame_image == active_label):
+        raise ValueError(
+            f'Selected label {active_label} is not present in frame {current_frame}.'
+        )
+
+    current_ids = set(int(x) for x in np.unique(frame_image) if int(x) > 0)
+    old_ids = set(int(x) for x in np.unique(old_frame_image) if int(x) > 0)
+
+    # Pixels in either the previous or current active-label footprint are the
+    # only pixels this Modify Label operation can authoritatively claim changed.
+    touched_pixels = ((old_frame_image == active_label) | (frame_image == active_label))
+    touched_ids = {active_label}
+    if np.any(touched_pixels):
+        touched_ids.update(int(x) for x in np.unique(old_frame_image[touched_pixels]) if int(x) > 0)
+        touched_ids.update(int(x) for x in np.unique(frame_image[touched_pixels]) if int(x) > 0)
+
+    # Any label that vanished anywhere in the frame is stale and must not be
+    # allowed to reappear on reload.
+    deleted_ids = sorted(old_ids - current_ids)
+
+    # Remeasure the active label every time.  Remeasure neighboring labels only
+    # when they still exist after being touched by the active-label edit.
+    measure_ids = [active_label]
+    measure_ids.extend(sorted(
+        label_id for label_id in touched_ids
+        if label_id != active_label and label_id in current_ids
+    ))
+
+    signal_image = create_intensityImage(channel_list, current_frame)
+    rebuilt_rows = []
+    for label_id in measure_ids:
+        rebuilt_rows.append(
+            _measure_label_row_from_frame(
+                channel_list, my_labels, df, current_frame, label_id,
+                object_properties, flag_list, signal_image=signal_image
+            )
+        )
+
+    # Remove exactly the rows that are being replaced plus labels the user
+    # removed completely.  Untouched rows remain unchanged and therefore cheap.
+    replace_ids = set(measure_ids) | set(deleted_ids)
+    numeric_track_ids = pd.to_numeric(df.track_id, errors='coerce')
+    remove_mask = (df.t == current_frame) & numeric_track_ids.isin(replace_ids)
+    working_df = df.loc[~remove_mask, :].copy()
+
+    rebuilt = pd.concat(rebuilt_rows, ignore_index=True)
+    all_cols = list(dict.fromkeys(list(working_df.columns) + list(rebuilt.columns)))
+    working_df = working_df.reindex(columns=all_cols)
+    rebuilt = rebuilt.reindex(columns=all_cols)
+    working_df = pd.concat([working_df, rebuilt], ignore_index=True)
+
+    actions = {
+        'affected_labels': sorted(touched_ids),
+        'rebuilt_labels': measure_ids,
+        'deleted_labels': deleted_ids,
+        'errors': [],
+    }
+    return working_df.reset_index(drop=True), actions
 
 def mod_trackLayer(data,properties,df,current_frame,active_label):
     
@@ -487,17 +818,21 @@ def labels_from_df(cell_data_all):
                 if row_diff > 0:  # need to pad
                     image_segment = np.pad(image_segment, ((0, row_diff), (0, 0)), mode='constant', constant_values=0)
                 elif row_diff < 0:  # need to trim
-                    image_segment = image_segment[:row_diff, :]
+                    image_segment = image_segment[:segment.shape[0], :]
 
                 # Adjust columns
                 col_diff = segment.shape[1] - image_segment.shape[1]
                 if col_diff > 0:  # need to pad
                     image_segment = np.pad(image_segment, ((0, 0), (0, col_diff)), mode='constant', constant_values=0)
                 elif col_diff < 0:  # need to trim
-                    image_segment = image_segment[:, :col_diff]
+                    image_segment = image_segment[:, :segment.shape[1]]
 
-                # Assign to label_image
-                label_image[min_row:max_row, min_col:max_col] = segment + image_segment
+                # Assign only the pixels belonging to this stored mask.  Do
+                # not add integer label IDs together when bounding boxes overlap.
+                target = label_image[min_row:max_row, min_col:max_col]
+                mask = image_segment != 0
+                target[mask] = int(my_cell.track_id)
+                label_image[min_row:max_row, min_col:max_col] = target
                                    
         labels.append(label_image)
     
